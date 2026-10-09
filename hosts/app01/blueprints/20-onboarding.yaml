@@ -1,0 +1,229 @@
+version: 1
+metadata:
+  name: BitHaven - member onboarding
+entries:
+  # ---- policies ----
+  - model: authentik_policies_password.passwordpolicy
+    id: pw-policy
+    identifiers:
+      name: bh-password-policy
+    attrs:
+      password_field: password
+      length_min: 8
+      amount_digits: 0
+      amount_lowercase: 0
+      amount_uppercase: 0
+      amount_symbols: 0
+      check_static_rules: true
+      check_have_i_been_pwned: false
+      check_zxcvbn: false
+      error_message: Password must be at least 8 characters.
+
+  - model: authentik_policies_expression.expressionpolicy
+    id: username-policy
+    identifiers:
+      name: bh-username-format
+    attrs:
+      expression: |
+        import re
+        u = (request.context.get("prompt_data") or {}).get("username", "")
+        if not re.fullmatch(r"[a-z][a-z0-9_.-]{2,31}", u):
+            ak_message("Username: 3-32 characters, lowercase letters, digits, . _ -, starting with a letter.")
+            return False
+        return True
+
+  - model: authentik_policies_expression.expressionpolicy
+    id: email-policy
+    identifiers:
+      name: bh-email-mismatch
+    attrs:
+      expression: |
+        # True = the submitted email does not match the invited one (or it cannot be checked): the Deny stage applies.
+        plan = request.context.get("flow_plan")
+        if plan is None:
+            return True
+        inv = plan.context.get("invitation")
+        want = ((inv.fixed_data or {}).get("email") or "").strip().lower() if inv else ""
+        got = ((plan.context.get("prompt_data") or {}).get("email") or "").strip().lower()
+        return (not want) or got != want
+
+  - model: authentik_policies_expression.expressionpolicy
+    id: ipa-failed-policy
+    identifiers:
+      name: bh-ipa-failed
+    attrs:
+      expression: |
+        # True = IPA creation did not succeed: the Deny stage applies. Also remove the half-made Authentik user,
+        # here (not in the create step) because the create step's own User Write stage would re-save it.
+        plan = request.context.get("flow_plan")
+        failed = not (plan is not None and plan.context.get("bh_ipa_created") is True)
+        if failed and plan is not None:
+            u = plan.context.get("pending_user")
+            try:
+                if u is not None and u.pk and getattr(u, "path", "") == "bithaven":
+                    u.delete()
+            except Exception as exc:
+                ak_logger.warning("bithaven cleanup of pending user failed", error=type(exc).__name__)
+        return failed
+
+  - model: authentik_policies_expression.expressionpolicy
+    id: aup-policy
+    identifiers:
+      name: bh-aup-accepted
+    attrs:
+      expression: |
+        if (request.context.get("prompt_data") or {}).get("aup") is not True:
+            ak_message("You must accept the Acceptable Use Policy.")
+            return False
+        return True
+
+  - model: authentik_policies_expression.expressionpolicy
+    id: ipa-policy
+    identifiers:
+      name: bh-ipa-create
+    attrs:
+      execution_logging: false
+      expression: !File /blueprints/custom/policies/ipa_create.py
+
+  # ---- prompt fields ----
+  - model: authentik_stages_prompt.prompt
+    id: f-name
+    identifiers: {name: bh-field-name}
+    attrs: {field_key: name, label: Full name, type: text, required: true, order: 10, placeholder: Full name}
+  - model: authentik_stages_prompt.prompt
+    id: f-username
+    identifiers: {name: bh-field-username}
+    attrs: {field_key: username, label: Username, type: username, required: true, order: 20, placeholder: Username}
+  - model: authentik_stages_prompt.prompt
+    id: f-email
+    identifiers: {name: bh-field-email}
+    attrs: {field_key: email, label: Email, type: email, required: true, order: 30, placeholder: Email}
+  - model: authentik_stages_prompt.prompt
+    id: f-password
+    identifiers: {name: bh-field-password}
+    attrs: {field_key: password, label: Password, type: password, required: true, order: 40, placeholder: Password}
+  - model: authentik_stages_prompt.prompt
+    id: f-password-repeat
+    identifiers: {name: bh-field-password-repeat}
+    attrs: {field_key: password_repeat, label: Password (repeat), type: password, required: true, order: 50, placeholder: Password (repeat)}
+  - model: authentik_stages_prompt.prompt
+    id: f-aup
+    identifiers: {name: bh-field-aup}
+    attrs:
+      field_key: aup
+      label: I accept the Acceptable Use Policy
+      type: checkbox
+      required: true
+      order: 60
+      sub_text: !Format ["Read the policy: %s", !Env AUP_URL]
+
+  # ---- stages ----
+  - model: authentik_stages_invitation.invitationstage
+    id: s-invite
+    identifiers: {name: bh-invitation}
+    attrs: {continue_flow_without_invitation: false}
+
+  - model: authentik_stages_prompt.promptstage
+    id: s-prompt
+    identifiers: {name: bh-enrollment-prompt}
+    attrs:
+      fields:
+        - !KeyOf f-name
+        - !KeyOf f-username
+        - !KeyOf f-email
+        - !KeyOf f-password
+        - !KeyOf f-password-repeat
+        - !KeyOf f-aup
+      validation_policies:
+        - !KeyOf pw-policy
+        - !KeyOf username-policy
+        - !KeyOf aup-policy
+
+  - model: authentik_stages_user_write.userwritestage
+    id: s-write
+    identifiers: {name: bh-user-write}
+    attrs: {user_creation_mode: always_create, create_users_as_inactive: true, user_path_template: bithaven, user_type: internal}
+
+  - model: authentik_stages_email.emailstage
+    id: s-email
+    identifiers: {name: bh-email-verify}
+    attrs:
+      use_global_settings: true
+      activate_user_on_success: true
+      subject: Confirm your BitHaven account
+      template: email/account_confirmation.html
+      token_expiry: minutes=30
+
+  - model: authentik_stages_user_write.userwritestage
+    id: s-ipa
+    identifiers: {name: bh-ipa-create-step}
+    attrs: {user_creation_mode: never_create, create_users_as_inactive: false, user_path_template: bithaven, user_type: internal}
+
+  - model: authentik_stages_deny.denystage
+    id: s-deny-email
+    identifiers: {name: bh-email-mismatch-deny}
+    attrs: {deny_message: The email address must match the one that was invited.}
+
+  - model: authentik_stages_deny.denystage
+    id: s-deny
+    identifiers: {name: bh-ipa-failed-deny}
+    attrs: {deny_message: We could not create your account. Contact a member admin.}
+
+  - model: authentik_stages_authenticator_totp.authenticatortotpstage
+    id: s-totp
+    identifiers: {name: bh-totp-setup}
+    attrs: {friendly_name: BitHaven, digits: 6}
+
+  - model: authentik_stages_user_login.userloginstage
+    id: s-login
+    identifiers: {name: bh-user-login}
+    attrs: {session_duration: seconds=0}
+
+  # ---- flow ----
+  - model: authentik_flows.flow
+    id: flow
+    identifiers: {slug: bithaven-enrollment}
+    attrs: {name: BitHaven enrollment, title: Join BitHaven, designation: enrollment, authentication: none, denied_action: message_continue}
+
+  - model: authentik_flows.flowstagebinding
+    identifiers: {target: !KeyOf flow, order: 10}
+    attrs: {stage: !KeyOf s-invite}
+  - model: authentik_flows.flowstagebinding
+    identifiers: {target: !KeyOf flow, order: 20}
+    attrs: {stage: !KeyOf s-prompt}
+  - model: authentik_flows.flowstagebinding
+    id: b-deny-email
+    identifiers: {target: !KeyOf flow, order: 25}
+    attrs: {stage: !KeyOf s-deny-email, evaluate_on_plan: false, re_evaluate_policies: true}
+  - model: authentik_flows.flowstagebinding
+    identifiers: {target: !KeyOf flow, order: 30}
+    attrs: {stage: !KeyOf s-write}
+  - model: authentik_flows.flowstagebinding
+    identifiers: {target: !KeyOf flow, order: 40}
+    attrs: {stage: !KeyOf s-email}
+  - model: authentik_flows.flowstagebinding
+    id: b-ipa
+    identifiers: {target: !KeyOf flow, order: 50}
+    attrs: {stage: !KeyOf s-ipa, evaluate_on_plan: false, re_evaluate_policies: true}
+  - model: authentik_flows.flowstagebinding
+    id: b-deny
+    identifiers: {target: !KeyOf flow, order: 55}
+    attrs: {stage: !KeyOf s-deny, evaluate_on_plan: false, re_evaluate_policies: true}
+  - model: authentik_flows.flowstagebinding
+    identifiers: {target: !KeyOf flow, order: 60}
+    attrs: {stage: !KeyOf s-totp}
+  - model: authentik_flows.flowstagebinding
+    identifiers: {target: !KeyOf flow, order: 70}
+    attrs: {stage: !KeyOf s-login}
+
+  - model: authentik_policies.policybinding
+    identifiers: {target: !KeyOf b-ipa, order: 0}
+    attrs: {policy: !KeyOf ipa-policy, negate: false, enabled: true, timeout: 30, failure_result: false}
+
+  - model: authentik_policies.policybinding
+    identifiers: {target: !KeyOf b-deny, order: 0}
+    attrs: {policy: !KeyOf ipa-failed-policy, negate: false, enabled: true, timeout: 30, failure_result: false}
+
+  - model: authentik_policies.policybinding
+    identifiers: {target: !KeyOf b-deny-email, order: 0}
+    attrs: {policy: !KeyOf email-policy, negate: false, enabled: true, timeout: 30, failure_result: false}

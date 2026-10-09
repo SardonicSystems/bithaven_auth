@@ -1,0 +1,44 @@
+version: 1
+metadata:
+  name: BitHaven - FreeIPA source
+entries:
+  - model: authentik_crypto.certificatekeypair
+    id: ipa-ca
+    identifiers:
+      name: bithaven-ipa-ca
+    attrs:
+      certificate_data: !File /certs/ipa-ca.crt
+
+  - model: authentik_sources_ldap.ldapsource
+    id: ipa-source
+    identifiers:
+      slug: bithaven-ipa
+    attrs:
+      name: BitHaven FreeIPA
+      enabled: true
+      server_uri: !Format ["ldaps://%s", !Env IPA_HOST]
+      start_tls: false
+      sni: true
+      peer_certificate: !KeyOf ipa-ca
+      bind_cn: !Format ["uid=%s,cn=users,cn=accounts,%s", !Env IPA_SYNC_UID, !Env IPA_BASEDN]
+      bind_password: !Env IPA_SYNC_PASSWORD
+      base_dn: !Env IPA_BASEDN
+      additional_user_dn: cn=users,cn=accounts
+      additional_group_dn: cn=groups,cn=accounts
+      user_object_filter: !Format ["(&(objectClass=person)(memberOf=cn=%s,cn=groups,cn=accounts,%s))", !Env IPA_GROUP_MEMBERS, !Env IPA_BASEDN]
+      group_object_filter: !Format ["(&(objectClass=groupofnames)(|(cn=%s)(cn=%s)))", !Env IPA_GROUP_MEMBERS, !Env IPA_GROUP_ADMINS]
+      group_membership_field: member
+      user_membership_attribute: distinguishedName
+      object_uniqueness_field: ipaUniqueID
+      sync_users: true
+      sync_groups: true
+      sync_users_password: false
+      password_login_update_internal_password: false
+      delete_not_found_objects: true
+      user_property_mappings:
+        - !Find [authentik_sources_ldap.ldapsourcepropertymapping, [managed, goauthentik.io/sources/ldap/default-mail]]
+        - !Find [authentik_sources_ldap.ldapsourcepropertymapping, [managed, goauthentik.io/sources/ldap/default-name]]
+        - !Find [authentik_sources_ldap.ldapsourcepropertymapping, [managed, goauthentik.io/sources/ldap/openldap-uid]]
+        - !Find [authentik_sources_ldap.ldapsourcepropertymapping, [managed, goauthentik.io/sources/ldap/openldap-cn]]
+      group_property_mappings:
+        - !Find [authentik_sources_ldap.ldapsourcepropertymapping, [managed, goauthentik.io/sources/ldap/openldap-cn]]

@@ -1,0 +1,13 @@
+# Secrets never enter git. Env values that are secret live here.
+secrets/*
+!secrets/.gitkeep
+*.secret
+*.key
+*.pem
+!*.pub
+
+# Local runtime output (committed results live in results/*.md only)
+results/*.log
+*.tmp
+.env
+__pycache__/

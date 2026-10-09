@@ -1,0 +1,70 @@
+version: 1
+metadata:
+  name: BitHaven - NetBird OIDC provider
+entries:
+  # The default "profile" scope returns every group the user is in. These replace it so only NetBird groups
+  # (NETBIRD_GROUPS_REGEX) ever appear in the token. The groups claim rides on the profile scope only: a separate
+  # groups scope mapping would be merged by concatenation and duplicate every group.
+  - model: authentik_providers_oauth2.scopemapping
+    id: nb-profile
+    identifiers: {name: bh-netbird-profile}
+    attrs:
+      scope_name: profile
+      description: Profile claims; groups limited to NetBird groups
+      expression: |
+        import os, re
+        avatar = request.user.avatar
+        pattern = os.environ["NETBIRD_GROUPS_REGEX"]
+        return delete_none_values({
+            "name": request.user.name,
+            "given_name": ak_obj_attr(request.user, "given_name", "name"),
+            "family_name": ak_obj_attr(request.user, "family_name"),
+            "preferred_username": request.user.username,
+            "nickname": request.user.username,
+            "groups": [g.name for g in request.user.groups.all() if re.search(pattern, g.name)],
+            "picture": avatar if avatar and not avatar.startswith("data:") else None,
+        })
+
+  - model: authentik_policies_expression.expressionpolicy
+    id: nb-access
+    identifiers: {name: bh-netbird-access}
+    attrs:
+      expression: |
+        import os, re
+        pattern = os.environ["NETBIRD_GROUPS_REGEX"]
+        return any(re.search(pattern, g.name) for g in request.user.groups.all())
+
+  - model: authentik_providers_oauth2.oauth2provider
+    id: nb-provider
+    identifiers: {name: bh-netbird}
+    attrs:
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      client_type: confidential
+      grant_types: [authorization_code, refresh_token]
+      client_id: netbird
+      client_secret: !Env NETBIRD_OIDC_CLIENT_SECRET
+      redirect_uris:
+        - {matching_mode: strict, url: !Format ["https://%s/oauth2/callback", !Env NETBIRD_HOST]}
+        - {matching_mode: strict, url: !Format ["https://%s/oauth2/logout/callback", !Env NETBIRD_HOST]}
+      signing_key: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+      issuer_mode: per_provider
+      include_claims_in_id_token: true
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-offline_access]]
+        - !KeyOf nb-profile
+
+  - model: authentik_core.application
+    id: nb-app
+    identifiers: {slug: netbird}
+    attrs:
+      name: NetBird
+      provider: !KeyOf nb-provider
+      policy_engine_mode: any
+      meta_launch_url: !Format ["https://%s", !Env NETBIRD_HOST]
+
+  - model: authentik_policies.policybinding
+    identifiers: {target: !KeyOf nb-app, order: 0}
+    attrs: {policy: !KeyOf nb-access, negate: false, enabled: true, timeout: 30}

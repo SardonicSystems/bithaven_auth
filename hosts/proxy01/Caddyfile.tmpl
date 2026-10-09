@@ -1,0 +1,17 @@
+{
+	email ${ACME_EMAIL}
+${ACME_CA_LINE}
+	servers {
+		strict_sni_host on
+	}
+}
+
+${AUTH_HOST} {
+${PUBLIC_TLS_BLOCK}
+	reverse_proxy ${APP_IP}:9000
+}
+
+${NETBIRD_HOST} {
+${PUBLIC_TLS_BLOCK}
+${NETBIRD_BODY}
+}
